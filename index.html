@@ -68,6 +68,12 @@ tr.active td{background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .exportrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .exportrow label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 #summary{color:var(--muted)}
+#saveStatus{flex-basis:100%;font-size:15px;min-height:1.5em}
+#saveStatus.ok{color:var(--accent);font-weight:600}
+#saveStatus.err{color:var(--danger);font-weight:600}
+button.type{font-size:13px;padding:3px 10px}
+button.type.keep{border-color:#2f9e44}
+button.type.remove{border-color:#e03131}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:10px 18px;border-radius:10px;opacity:0;pointer-events:none;transition:opacity .25s;max-width:90vw}
 #toast.show{opacity:.95}
 kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;font-size:12px;font-family:inherit}
@@ -121,12 +127,14 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
           <b>🗑️ הסרת קטעים לא רצויים</b><span>הקטעים המסומנים יוסרו, כל השאר יישמר לקובץ אחד</span></label>
       </div>
       <table>
-        <thead><tr><th>קטע</th><th>התחלה</th><th>סיום</th><th>אורך</th><th></th></tr></thead>
+        <thead><tr><th>קטע</th><th>סוג</th><th>התחלה</th><th>סיום</th><th>אורך</th><th></th></tr></thead>
         <tbody id="segRows"></tbody>
       </table>
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
         <button id="addSeg">➕ הוסף קטע</button>
       </div>
+      <div class="hint"><b>שילוב:</b> לחיצה על "לשמור"/"להסיר" בטבלה מחליפה את סוג הקטע, כך שאפשר לשמור קטע ולהסיר חלק מתוכו באותה פעולה.
+        קטעים לשמירה מסומנים בצבעים קרים (ירוק, כחול), וקטעים להסרה בצבעים חמים ובפסים (אדום, כתום).</div>
       <div class="hint">אפשר להקליד זמן בכל צורה: <span dir="ltr">2:30</span>, <span dir="ltr">02:30</span>, <span dir="ltr">1:02:30</span>, <span dir="ltr">150</span>, <span dir="ltr">2:39.5</span>.
         בתוך תיבת זמן: <kbd>↑</kbd>/<kbd>↓</kbd> מזיזים שנייה, ועם <kbd>Shift</kbd> עשירית שנייה. "📍" קובע את הזמן לפי המיקום הנוכחי בנגן.</div>
     </div>
@@ -139,6 +147,7 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
       <span class="grow"></span>
       <span id="summary"></span>
       <button class="primary" id="saveBtn">💾 שמור</button>
+      <div id="saveStatus"></div>
     </div>
   </section>
 </main>
@@ -150,7 +159,11 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;paddi
 /* ================= helpers ================= */
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const COLORS = ['#2f9e44', '#1c7ed6', '#e8590c', '#9c36b5', '#d6336c', '#0c8599', '#a0522d', '#5c940d', '#f08c00', '#3b5bdb'];
+// cool colours mark ranges to keep, warm ones ranges to remove, so the two kinds never look alike
+const PALETTE = {
+  keep: ['#2f9e44', '#1c7ed6', '#0c8599', '#7048e8', '#5c940d', '#3b5bdb', '#1098ad', '#2b8a3e'],
+  remove: ['#e03131', '#e8590c', '#d6336c', '#a0522d', '#f08c00', '#c2255c', '#d9480f', '#862e9c'],
+};
 let toastTimer;
 function toast(msg, ms = 3200) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms); }
 
@@ -515,7 +528,9 @@ const player = {
     this.fileUrl = URL.createObjectURL(file); this.base = 0; this.pos = 0;
     if (S.kind !== 'mp3') audio.src = this.fileUrl; else audio.removeAttribute('src');
   },
-  time() { return this.playing && !this.loading ? this.base + audio.currentTime : this.pos; },
+  // playback starts at the frame boundary just before the requested time; never report less than
+  // the requested time, or the "skip" logic sees a spot outside the range and jumps back forever
+  time() { return this.playing && !this.loading ? Math.max(this.pos, this.base + audio.currentTime) : this.pos; },
   async start(t) {
     t = clamp(t, 0, S.duration);
     this.pos = t;
@@ -544,10 +559,13 @@ audio.addEventListener('ended', () => { if (player.playing) { player.playing = f
 function updatePlayBtn() { $('playBtn').textContent = player.playing ? '⏸' : '▶'; }
 
 /* ================= segments ================= */
-function addSegment(a, b) {
-  const used = new Set(S.segs.map(s => s.color));
-  const color = COLORS.find(c => !used.has(c)) || COLORS[S.segs.length % COLORS.length];
-  const s = { id: S.nextId++, a: Math.min(a, b), b: Math.max(a, b), color };
+function pickColor(type, except) {
+  const used = new Set(S.segs.filter(s => s !== except).map(s => s.color)), pal = PALETTE[type];
+  return pal.find(c => !used.has(c)) || pal[S.segs.length % pal.length];
+}
+function addSegment(a, b, type) {
+  type = type || S.mode;
+  const s = { id: S.nextId++, a: Math.min(a, b), b: Math.max(a, b), type, color: pickColor(type) };
   S.segs.push(s); S.active = s.id;
   renderRows(); invalidate();
   return s;
@@ -563,23 +581,35 @@ function setEdge(s, edge, t) {
   if (edge === 'a') s.a = Math.min(t, s.b); else s.b = Math.max(t, s.a);
   updateRow(s); updateSummary(); invalidate();
 }
-function merged() { // union of all segments, sorted
-  const r = S.segs.filter(s => s.b - s.a > 0.001).map(s => [s.a, s.b]).sort((x, y) => x[0] - y[0]);
+function merged(type) { // union of the segments of one type, sorted
+  const r = S.segs.filter(s => s.type === type && s.b - s.a > 0.001).map(s => [s.a, s.b]).sort((x, y) => x[0] - y[0]);
   const out = [];
   for (const [a, b] of r) { if (out.length && a <= out[out.length-1][1]) out[out.length-1][1] = Math.max(out[out.length-1][1], b); else out.push([a, b]); }
   return out;
 }
-function keptRanges() { // time ranges that end up in the output (for join / remove)
-  const u = merged();
-  if (S.mode === 'keep') return u;
-  const out = []; let t = 0;
-  for (const [a, b] of u) { if (a > t) out.push([t, a]); t = Math.max(t, b); }
-  if (t < S.duration) out.push([t, S.duration]);
+function subtract(ranges, cut) { // ranges minus cut, both sorted
+  const out = [];
+  for (let [a, b] of ranges) {
+    for (const [c, d] of cut) {
+      if (d <= a || c >= b) continue;
+      if (c > a) out.push([a, c]);
+      a = Math.max(a, d);
+      if (a >= b) break;
+    }
+    if (b - a > 0.001) out.push([a, b]);
+  }
   return out;
 }
+// output = the ranges marked "keep" (or the whole file when there are none) minus the ranges marked "remove"
+function keptRanges(base) {
+  const keep = merged('keep');
+  return subtract(base || (keep.length ? keep : [[0, S.duration]]), merged('remove'));
+}
+const hasKeep = () => S.segs.some(s => s.type === 'keep');
 function isKept(t) { // for display / playback skipping
-  for (const s of S.segs) if (t >= s.a && t < s.b) return S.mode === 'keep';
-  return S.mode !== 'keep';
+  let inKeep = false;
+  for (const s of S.segs) if (t >= s.a && t < s.b) { if (s.type === 'remove') return false; inKeep = true; }
+  return inKeep || !hasKeep();
 }
 
 /* ================= segment table ================= */
@@ -587,7 +617,7 @@ function renderRows() {
   const tb = $('segRows');
   tb.innerHTML = '';
   if (!S.segs.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty">אין קטעים. לחץ "הוסף קטע" או גרור על הגל.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="empty">אין קטעים. לחץ "הוסף קטע" או גרור על הגל.</td></tr>';
     updateSummary(); return;
   }
   S.segs.forEach((s, idx) => {
@@ -595,6 +625,7 @@ function renderRows() {
     tr.dataset.id = s.id;
     tr.innerHTML = `
       <td><span class="chip" title="הצג את הקטע"><i style="background:${s.color}"></i>קטע ${idx + 1}</span></td>
+      <td><button class="type ${s.type}" data-act="type" title="לחץ כדי להחליף בין שמירה להסרה">${s.type === 'keep' ? '✅ לשמור' : '🗑️ להסיר'}</button></td>
       <td><span class="tcell"><input type="text" data-e="a" title="זמן התחלה"><button class="icon" data-now="a" title="קבע לפי המיקום הנוכחי בנגן">📍</button></span></td>
       <td><span class="tcell"><input type="text" data-e="b" title="זמן סיום"><button class="icon" data-now="b" title="קבע לפי המיקום הנוכחי בנגן">📍</button></span></td>
       <td><span class="len"></span></td>
@@ -622,10 +653,10 @@ function setActive(id) {
 function updateSummary() {
   const r = keptRanges();
   const total = r.reduce((n, [a, b]) => n + b - a, 0);
-  const split = S.mode === 'keep' && document.querySelector('input[name=join]:checked').value === 'split';
-  $('keepOpts').hidden = S.mode !== 'keep';
+  const split = isSplit();
+  $('keepOpts').hidden = !hasKeep();
   $('summary').textContent = !S.segs.length ? '' :
-    split ? `${S.segs.length} קבצים` : `אורך התוצאה: ${T(total)}`;
+    split ? `${splitItems().length} קבצים` : `אורך התוצאה: ${T(total)}`;
   $('saveBtn').disabled = !S.segs.length || total <= 0;
 }
 
@@ -638,6 +669,7 @@ $('segRows').addEventListener('click', e => {
   if (!btn) return;
   if (btn.dataset.now) setEdge(s, btn.dataset.now, player.time());
   else if (btn.dataset.act === 'del') removeSegment(s.id);
+  else if (btn.dataset.act === 'type') { s.type = s.type === 'keep' ? 'remove' : 'keep'; s.color = pickColor(s.type, s); renderRows(); invalidate(true); }
   else if (btn.dataset.act === 'play') { player.stopAt = null; player.start(s.a).then(() => { player.stopAt = s.id; }); if (s.a < S.viewStart || s.a > viewEnd()) showRange(s.a, s.b); }
 });
 $('segRows').addEventListener('focusin', e => { const tr = e.target.closest('tr[data-id]'); if (tr) setActive(+tr.dataset.id); });
@@ -679,7 +711,14 @@ $('addSeg').addEventListener('click', () => {
 });
 
 for (const r of document.querySelectorAll('input[name=mode]')) r.addEventListener('change', () => {
+  const prev = S.mode;
   S.mode = document.querySelector('input[name=mode]:checked').value;
+  // the cards set the type of new segments; existing ones follow only while they are all of one type
+  if (S.segs.length && S.segs.every(s => s.type === prev)) {
+    for (const s of S.segs) s.type = S.mode;
+    for (const s of S.segs) s.color = pickColor(s.type, s);
+    renderRows();
+  }
   $('modeKeep').classList.toggle('on', S.mode === 'keep'); $('modeRemove').classList.toggle('on', S.mode === 'remove');
   updateSummary(); invalidate(true);
 });
@@ -724,7 +763,7 @@ function peakAt(t0, t1) {
 }
 const RULER = 20;
 function drawWaveLayer(W, H, dpr) {
-  const key = [W, H, S.viewStart, S.spp, S.peaksVer, S.mode, colors.wave, JSON.stringify(S.segs.map(s => [s.a, s.b]))].join('|');
+  const key = [W, H, S.viewStart, S.spp, S.peaksVer, S.mode, colors.wave, JSON.stringify(S.segs.map(s => [s.a, s.b, s.type]))].join('|');
   if (key === layerKey) return;
   layerKey = key;
   sizeCanvas(layer, W, H);
@@ -766,9 +805,9 @@ function draw() {
   for (const s of S.segs) {
     const x0 = xOf(s.a) * dpr, x1 = xOf(s.b) * dpr;
     if (x1 < -20 || x0 > W + 20) continue;
-    g.globalAlpha = S.mode === 'keep' ? 0.16 : 0.22;
+    g.globalAlpha = s.type === 'keep' ? 0.16 : 0.22;
     g.fillStyle = s.color; g.fillRect(x0, top, x1 - x0, H - top);
-    if (S.mode === 'remove') { // hatch removed areas
+    if (s.type === 'remove') { // hatch removed areas
       g.globalAlpha = 0.35; g.strokeStyle = s.color; g.lineWidth = dpr;
       g.save(); g.beginPath(); g.rect(x0, top, x1 - x0, H - top); g.clip(); g.beginPath();
       for (let x = x0 - H; x < x1; x += 10 * dpr) { g.moveTo(x, H); g.lineTo(x + H - top, top); }
@@ -823,19 +862,25 @@ function drawOverview(dpr) {
 
 /* ================= main loop: clock, follow playhead, preview skipping ================= */
 let lastClock = '', lastTime = -1;
+// stopping at a segment end and skipping removed parts run on a timer, not on animation frames,
+// because browsers stop animation frames while the window is hidden or minimised
+function playbackTick() {
+  if (!S.peaks || !player.playing || player.loading) return;
+  const t = player.time();
+  if (player.stopAt != null) {
+    const s = seg(player.stopAt);
+    if (!s || t >= s.b) { player.pause(); player.seek(s ? s.b : t); }
+  } else if ($('skipOff').checked && !isKept(t)) {
+    const r = keptRanges().find(([a, b]) => b > t + 0.02);
+    if (r) player.start(Math.max(r[0], t)); else player.pause();
+  }
+}
+setInterval(playbackTick, 30);
 function frame() {
   if (S.peaks) {
+    playbackTick();
     const t = player.time();
-    if (player.playing && !player.loading) {
-      if (player.stopAt != null) {
-        const s = seg(player.stopAt);
-        if (!s || t >= s.b) { player.pause(); player.seek(s ? s.b : t); }
-      } else if ($('skipOff').checked && !isKept(t)) {
-        const r = keptRanges().find(([a, b]) => b > t + 0.02);
-        if (r) player.start(Math.max(r[0], t)); else { player.pause(); }
-      }
-      if (!drag && (t > viewEnd() - S.spp * 20 || t < S.viewStart)) setView(t - S.spp * 40, S.spp);
-    }
+    if (player.playing && !player.loading && !drag && (t > viewEnd() - S.spp * 20 || t < S.viewStart)) setView(t - S.spp * 40, S.spp);
     if (t !== lastTime) { lastTime = t; dirty = true; }
     const c = T(t) + ' <small>/ ' + T(S.duration) + '</small>';
     if (c !== lastClock) { lastClock = c; $('clock').innerHTML = c; }
@@ -958,42 +1003,51 @@ function download(blob, name) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
+const mb = n => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + ' MB';
+// returns a description of where the file went, or null if the user cancelled
 async function saveOne(blob, name) {
   if (window.showSaveFilePicker) {
     try {
       const h = await showSaveFilePicker({ suggestedName: name, types: [{ description: 'קובץ שמע', accept: { [blob.type]: [ext()] } }] });
       const w = await h.createWritable(); await w.write(blob); await w.close();
-      return true;
-    } catch (e) { if (e.name === 'AbortError') return false; }
+      return `נשמר הקובץ "${h.name}" (${mb(blob.size)})`;
+    } catch (e) { if (e.name === 'AbortError') return null; }
   }
-  download(blob, name); return true;
+  download(blob, name);
+  return `הקובץ "${name}" (${mb(blob.size)}) ירד לתיקיית ההורדות`;
 }
 async function saveMany(items) {
   if (window.showDirectoryPicker) {
     try {
       const dir = await showDirectoryPicker({ mode: 'readwrite' });
       for (const { blob, name } of items) { const h = await dir.getFileHandle(name, { create: true }); const w = await h.createWritable(); await w.write(blob); await w.close(); }
-      return true;
-    } catch (e) { if (e.name === 'AbortError') return false; }
+      return `נשמרו ${items.length} קבצים בתיקייה "${dir.name}"`;
+    } catch (e) { if (e.name === 'AbortError') return null; }
   }
   for (const { blob, name } of items) { download(blob, name); await new Promise(r => setTimeout(r, 400)); }
-  return true;
+  return `${items.length} קבצים ירדו לתיקיית ההורדות (אם הדפדפן שואל, אשר "הורדת קבצים מרובים")`;
 }
+function isSplit() { return hasKeep() && document.querySelector('input[name=join]:checked').value === 'split'; }
+function splitItems() { // every "keep" range becomes its own file, minus whatever overlaps a "remove" range
+  return S.segs.filter(s => s.type === 'keep' && s.b - s.a > 0.001).slice().sort((x, y) => x.a - y.a)
+    .map(s => keptRanges([[s.a, s.b]])).filter(r => r.length);
+}
+function setStatus(msg, kind) { const el = $('saveStatus'); el.textContent = msg; el.className = kind || ''; }
 $('saveBtn').onclick = async () => {
   const btn = $('saveBtn'); btn.disabled = true;
+  setStatus('⏳ שומר…');
   try {
-    const split = S.mode === 'keep' && document.querySelector('input[name=join]:checked').value === 'split';
-    if (split) {
-      const segs = S.segs.filter(s => s.b - s.a > 0.001).slice().sort((x, y) => x.a - y.a);
-      const items = segs.map((s, i) => ({ blob: blobFor([[s.a, s.b]]), name: `${baseName()} - קטע ${i + 1}${ext()}` })).filter(x => x.blob);
-      if (await saveMany(items)) toast(`נשמרו ${items.length} קבצים`);
+    let res;
+    if (isSplit()) {
+      const items = splitItems().map((r, i) => ({ blob: blobFor(r), name: `${baseName()} - קטע ${i + 1}${ext()}` })).filter(x => x.blob);
+      res = await saveMany(items);
     } else {
       const blob = blobFor(keptRanges());
-      if (!blob) { toast('אין מה לשמור: התוצאה ריקה'); return; }
-      const name = `${baseName()} - ${S.mode === 'keep' ? 'קטעים' : 'חתוך'}${ext()}`;
-      if (await saveOne(blob, name)) toast('נשמר: ' + name);
+      if (!blob) { setStatus('אין מה לשמור: התוצאה ריקה', 'err'); return; }
+      res = await saveOne(blob, `${baseName()} - ${hasKeep() ? 'קטעים' : 'חתוך'}${ext()}`);
     }
-  } catch (e) { toast('השמירה נכשלה: ' + e.message, 6000); }
+    if (res) setStatus('✅ ' + res, 'ok'); else setStatus('השמירה בוטלה');
+  } catch (e) { setStatus('❌ השמירה נכשלה: ' + e.message, 'err'); }
   finally { updateSummary(); }
 };
 
