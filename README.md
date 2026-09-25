@@ -4,7 +4,7 @@
 אין התקנה, אין אינטרנט, והקובץ לא יוצא מהמחשב.
 
 **הורדה:** [audio-cutter.html](https://github.com/tsoolgee/audio-cutter/releases/latest/download/audio-cutter.html)
-· **גרסה מקוונת:** https://tsoolgee.github.io/audio-cutter/
+· **גרסה מקוונת:** https://tsoolgee.uk/MEDYA-CATER
 
 ## מה אפשר לעשות
 - **שמירת קטעים רצויים**: מסמנים כמה קטעים שרוצים לשמור, ושומרים אותם מחוברים לקובץ אחד או כל קטע לקובץ נפרד.
